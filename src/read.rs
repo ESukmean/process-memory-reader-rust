@@ -62,16 +62,19 @@ impl Reader {
 		println!("info {:?}", self.module_info.modBaseSize as usize);
 
 		let mut buf = vec![0; self.module_info.modBaseSize as usize];
-		let mut read = 0;
+		let mut read_length = 0;
 		let success = unsafe {
 			winapi::um::memoryapi::ReadProcessMemory(
 				self.process_handle,
 				self.module_info.modBaseAddr as LPCVOID,
 				buf.as_mut_ptr() as LPVOID,
 				buf.len(),
-				&mut read,
+				&mut read_length,
 			)
 		};
+
+		// 벡터의 길이를 실제로 읽은 데이터 크기로 설정
+		buf.truncate(read_length);
 
 		match success == 0 {
 			true => return Ok(buf),
