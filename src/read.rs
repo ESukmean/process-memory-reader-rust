@@ -82,3 +82,14 @@ impl Reader {
 		return Ok(buf);
 	}
 }
+
+impl Drop for Reader {
+	fn drop(&mut self) {
+		unsafe { 
+			winapi::um::handleapi::CloseHandle(self.process_handle);
+			if let Some(handle) = self.module_handle {
+				winapi::um::handleapi::CloseHandle(handle);
+			}
+		}
+	}
+}
