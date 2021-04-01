@@ -9,25 +9,15 @@ pub struct Reader {
 }
 
 impl Reader {
-	pub fn new(pid: DWORD) -> Self {
-		let mut result = Self {
-			pid: pid,
-			process_handle: std::ptr::null_mut(),
-			module_handle: None,
-			module_info: winapi::um::tlhelp32::MODULEENTRY32::default(),
-		};
-		result.module_info.dwSize =
-			std::mem::size_of::<winapi::um::tlhelp32::MODULEENTRY32>() as u32;
+	pub fn new(pid: DWORD) -> std::io::Result<Self> {
+		let mut module_info = winapi::um::tlhelp32::MODULEENTRY32::default();
+		module_info.dwSize = std::mem::size_of::<winapi::um::tlhelp32::MODULEENTRY32>() as u32;
 
-		return result;
-	}
-
-	pub fn open(&mut self) -> std::io::Result<()> {
 		let process_handle = unsafe {
 			winapi::um::processthreadsapi::OpenProcess(
 				winapi::um::winnt::PROCESS_VM_READ,
 				winapi::shared::minwindef::FALSE,
-				self.pid,
+				pid,
 			)
 		};
 
@@ -35,10 +25,15 @@ impl Reader {
 			return Err(std::io::Error::last_os_error());
 		}
 
-		self.process_handle = process_handle;
-		return Ok(());
+		return Ok(Self {
+			pid: pid,
+			module_handle: None,
+			process_handle,
+			module_info,
+		});
 	}
-	pub fn read(mut self) -> std::io::Result<Vec<u8>> {
+
+	pub fn read(&mut self) -> std::io::Result<Vec<u8>> {
 		let success = unsafe {
 			let initialized = self.module_handle.is_some();
 			if initialized == false {
@@ -68,24 +63,26 @@ impl Reader {
 
 		let mut buf = vec![0; self.module_info.modBaseSize as usize];
 		let mut read = 0;
-		unsafe {
+		let success = unsafe {
 			winapi::um::memoryapi::ReadProcessMemory(
 				self.process_handle,
 				self.module_info.modBaseAddr as LPCVOID,
 				buf.as_mut_ptr() as LPVOID,
 				buf.len(),
 				&mut read,
-			);
-		}
+			)
+		};
 
-		println!("{:?}", buf);
-		return Ok(buf);
+		match success == 0 {
+			true => return Ok(buf),
+			false => return Err(std::io::Error::last_os_error()),
+		}
 	}
 }
 
 impl Drop for Reader {
 	fn drop(&mut self) {
-		unsafe { 
+		unsafe {
 			winapi::um::handleapi::CloseHandle(self.process_handle);
 			if let Some(handle) = self.module_handle {
 				winapi::um::handleapi::CloseHandle(handle);
