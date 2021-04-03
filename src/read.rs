@@ -1,18 +1,86 @@
 use winapi::ctypes::*;
 use winapi::shared::minwindef::*;
 use winapi::um::winnt::HANDLE;
-pub struct Reader {
-	pid: DWORD,
-	process_handle: HANDLE,
-	module_handle: Option<winapi::um::winnt::HANDLE>,
-	module_info: winapi::um::tlhelp32::MODULEENTRY32,
+
+const INVAILD_HANDLE: i32 = -1;
+
+pub struct ModuleReader {
+	handle: winapi::um::winnt::HANDLE,
+	is_first: bool,
+}
+impl ModuleReader {
+	pub fn new(pid: DWORD) -> std::io::Result<Self> {
+		let handle = unsafe { winapi::um::tlhelp32::CreateToolhelp32Snapshot(8, pid) };
+		if handle as i32 == INVAILD_HANDLE {
+			return Err(std::io::Error::last_os_error());
+		}
+
+		Ok(Self {
+			handle,
+			is_first: true,
+		})
+	}
+	pub fn read(&mut self) -> std::io::Result<winapi::um::tlhelp32::MODULEENTRY32> {
+		let mut result = winapi::um::tlhelp32::MODULEENTRY32::default();
+		result.dwSize = std::mem::size_of::<winapi::um::tlhelp32::MODULEENTRY32>() as u32;
+
+		let success = match self.is_first {
+			true => {
+				self.is_first = false;
+
+				unsafe { winapi::um::tlhelp32::Module32First(self.handle, &mut result) }
+			}
+			false => unsafe { winapi::um::tlhelp32::Module32Next(self.handle, &mut result) },
+		};
+		// println!(
+		// 	"name: {:?} / exe: {:?} / glb: {} / proc: {} / size: {} ",
+		// 	String::from_utf8_lossy(
+		// 		&(result.szModule
+		// 			.to_vec()
+		// 			.iter()
+		// 			.map(|v| *v as u8)
+		// 			.collect::<Vec<u8>>())
+		// 	),
+		// 	String::from_utf8_lossy(
+		// 		&(result.szExePath
+		// 			.to_vec()
+		// 			.iter()
+		// 			.map(|v| *v as u8)
+		// 			.collect::<Vec<u8>>())
+		// 	),
+		// 	result.GlblcntUsage,
+		// 	result.ProccntUsage,
+		// 	result.modBaseSize
+		// );
+
+		if success as i32 == 0 {
+			return Err(std::io::Error::last_os_error());
+		}
+
+		return Ok(result);
+	}
+}
+impl Drop for ModuleReader {
+	fn drop(&mut self) {
+		unsafe {
+			winapi::um::handleapi::CloseHandle(self.handle);
+		}
+	}
+}
+impl Iterator for ModuleReader {
+	type Item = winapi::um::tlhelp32::MODULEENTRY32;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		self.read().ok()
+	}
 }
 
-impl Reader {
-	pub fn new(pid: DWORD) -> std::io::Result<Self> {
-		let mut module_info = winapi::um::tlhelp32::MODULEENTRY32::default();
-		module_info.dwSize = std::mem::size_of::<winapi::um::tlhelp32::MODULEENTRY32>() as u32;
+pub struct MemoryReader {
+	process_handle: HANDLE,
+}
 
+impl MemoryReader {
+	pub fn new(pid: DWORD) -> std::io::Result<Self> {
 		let process_handle = unsafe {
 			winapi::um::processthreadsapi::OpenProcess(
 				winapi::um::winnt::PROCESS_VM_READ,
@@ -21,52 +89,21 @@ impl Reader {
 			)
 		};
 
-		if process_handle.is_null() {
+		if process_handle as i32 == INVAILD_HANDLE {
 			return Err(std::io::Error::last_os_error());
 		}
 
-		return Ok(Self {
-			pid: pid,
-			module_handle: None,
-			process_handle,
-			module_info,
-		});
+		return Ok(Self { process_handle });
 	}
 
-	pub fn read(&mut self) -> std::io::Result<Vec<u8>> {
-		let success = unsafe {
-			let initialized = self.module_handle.is_some();
-			if initialized == false {
-				self.module_handle
-					.replace(winapi::um::tlhelp32::CreateToolhelp32Snapshot(8, self.pid));
-				println!("module {:?}", self.module_handle);
-			}
-
-			match initialized {
-				true => winapi::um::tlhelp32::Module32First(
-					*self.module_handle.as_mut().unwrap(),
-					&mut self.module_info,
-				),
-				false => winapi::um::tlhelp32::Module32Next(
-					*self.module_handle.as_mut().unwrap(),
-					&mut self.module_info,
-				),
-			}
-		};
-
-		if success == 0 {
-			return Err(std::io::Error::last_os_error());
-		}
-
-		println!("base {:?}", self.module_info.modBaseAddr as usize);
-		println!("info {:?}", self.module_info.modBaseSize as usize);
-
-		let mut buf = vec![0; self.module_info.modBaseSize as usize];
+	pub fn read(&mut self, addr: *mut u8, size: u32) -> std::io::Result<Vec<u8>> {
 		let mut read_length = 0;
+		let mut buf = vec![0u8; size as usize];
+
 		let success = unsafe {
 			winapi::um::memoryapi::ReadProcessMemory(
 				self.process_handle,
-				self.module_info.modBaseAddr as LPCVOID,
+				addr as *const c_void,
 				buf.as_mut_ptr() as LPVOID,
 				buf.len(),
 				&mut read_length,
@@ -77,18 +114,52 @@ impl Reader {
 		buf.truncate(read_length);
 
 		match success == 0 {
-			true => return Ok(buf),
-			false => return Err(std::io::Error::last_os_error()),
+			true => return Err(std::io::Error::last_os_error()),
+			false => return Ok(buf),
 		}
 	}
 }
 
-impl Drop for Reader {
+impl Drop for MemoryReader {
 	fn drop(&mut self) {
 		unsafe {
 			winapi::um::handleapi::CloseHandle(self.process_handle);
-			if let Some(handle) = self.module_handle {
-				winapi::um::handleapi::CloseHandle(handle);
+		}
+	}
+}
+
+pub struct ModuleMemory {
+	pub module: winapi::um::tlhelp32::MODULEENTRY32,
+	pub data: Vec<u8>,
+}
+
+pub struct ProcessMemoryReader {
+	module: ModuleReader,
+	process: MemoryReader,
+}
+impl ProcessMemoryReader {
+	pub fn new(pid: DWORD) -> std::io::Result<Self> {
+		let process = MemoryReader::new(pid)?;
+		let module = ModuleReader::new(pid)?;
+
+		return Ok(Self { process, module });
+	}
+}
+impl Iterator for ProcessMemoryReader {
+	type Item = ModuleMemory;
+
+	fn next(&mut self) -> Option<ModuleMemory> {
+		match self.module.next() {
+			None => {
+				println!("none");
+				return None;
+			}
+			Some(v) => {
+				return self
+					.process
+					.read(v.modBaseAddr, v.modBaseSize)
+					.map(|data| Self::Item { module: v, data })
+					.ok();
 			}
 		}
 	}
